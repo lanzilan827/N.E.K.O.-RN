@@ -5,15 +5,18 @@
  * Sync N.E.K.O frontend workspace packages into N.E.K.O.-RN workspace packages.
  *
  * Default mapping:
- * - N.E.K.O/frontend/packages/common    -> N.E.K.O.-RN/packages/project-neko-common
- * - N.E.K.O/frontend/packages/components-> N.E.K.O.-RN/packages/project-neko-components
- * - N.E.K.O/frontend/packages/request   -> N.E.K.O.-RN/packages/project-neko-request
- * - N.E.K.O/frontend/packages/realtime  -> N.E.K.O.-RN/packages/project-neko-realtime (created if missing)
+ * - N.E.K.O/frontend/packages/common       -> N.E.K.O.-RN/packages/project-neko-common
+ * - N.E.K.O/frontend/packages/components   -> N.E.K.O.-RN/packages/project-neko-components
+ * - N.E.K.O/frontend/packages/request      -> N.E.K.O.-RN/packages/project-neko-request
+ * - N.E.K.O/frontend/packages/realtime     -> N.E.K.O.-RN/packages/project-neko-realtime
+ * - N.E.K.O/frontend/packages/audio-service-> N.E.K.O.-RN/packages/project-neko-audio-service
+ * - N.E.K.O/frontend/packages/live2d-service->N.E.K.O.-RN/packages/project-neko-live2d-service
  *
  * Safety:
  * - Excludes noisy folders (node_modules, dist, coverage, .vite, .turbo)
  * - By default cleans the destination package folder before copying (mirror behavior)
  * - Post-processes vite.config.ts to fix outDir from "../../../static/bundles" to "../../static/bundles" for RN repo
+ * - After sync, applies overlay from packages-overrides/ (RN-specific files)
  */
 
 const fs = require("fs");
@@ -27,6 +30,7 @@ function parseArgs(argv) {
     dryRun: false,
     clean: true,
     postprocess: true,
+    applyOverlay: true,
     verbose: false,
   };
 
@@ -44,6 +48,10 @@ function parseArgs(argv) {
       out.clean = false;
     } else if (a === "--no-postprocess") {
       out.postprocess = false;
+    } else if (a === "--no-overlay") {
+      out.applyOverlay = false;
+    } else if (a === "--no-overlay") {
+      out.applyOverlay = false;
     } else if (a === "--verbose" || a === "-v") {
       out.verbose = true;
     } else if (a === "--help" || a === "-h") {
@@ -64,10 +72,12 @@ Usage:
 Options:
   -s, --source <path>       Source packages dir (default: ../N.E.K.O/frontend/packages)
   -d, --dest <path>         Dest packages dir (default: ./packages)
-  -p, --packages <list>     Comma list: common,components,request,realtime (default: all)
+  -p, --packages <list>     Comma list: common,components,request,realtime,audio-service,live2d-service (default: all)
       --dry-run             Print actions, do not write
       --no-clean            Do not delete destination package folder before copy
       --no-postprocess      Skip vite.config.ts outDir fixups
+      --no-overlay          Skip applying packages-overrides/ after sync
+      --no-overlay          Skip applying packages-overrides/ after sync
   -v, --verbose             Verbose logging
   -h, --help                Show help
 
@@ -133,6 +143,37 @@ function patchFileIfExists(filePath, replacer, dryRun, verbose) {
   return true;
 }
 
+function applyOverlayForPackage(overlayDir, destDir, dryRun, verbose) {
+  if (!fs.existsSync(overlayDir)) return [];
+
+  const appliedFiles = [];
+  
+  const walkAndCopy = (srcPath, destPath) => {
+    const stat = fs.statSync(srcPath);
+    if (stat.isDirectory()) {
+      if (!dryRun) {
+        fs.mkdirSync(destPath, { recursive: true });
+      }
+      const entries = fs.readdirSync(srcPath);
+      for (const entry of entries) {
+        walkAndCopy(path.join(srcPath, entry), path.join(destPath, entry));
+      }
+    } else if (stat.isFile()) {
+      const relPath = path.relative(overlayDir, srcPath);
+      appliedFiles.push(relPath);
+      if (!dryRun) {
+        fs.copyFileSync(srcPath, destPath);
+      }
+      if (verbose || dryRun) {
+        console.log(`[sync-neko-packages] ${dryRun ? '(dry-run) ' : ''}overlay: ${relPath}`);
+      }
+    }
+  };
+
+  walkAndCopy(overlayDir, destDir);
+  return appliedFiles;
+}
+
 function main() {
   const args = parseArgs(process.argv.slice(2));
 
@@ -148,6 +189,8 @@ function main() {
     components: { src: "components", dest: "project-neko-components" },
     request: { src: "request", dest: "project-neko-request" },
     realtime: { src: "realtime", dest: "project-neko-realtime" },
+    "audio-service": { src: "audio-service", dest: "project-neko-audio-service" },
+    "live2d-service": { src: "live2d-service", dest: "project-neko-live2d-service" },
   };
 
   const selected = (args.packages
@@ -174,6 +217,8 @@ function main() {
   }
 
   ensureDirSync(destBase, args.dryRun);
+
+  const overlayResults = {};
 
   for (const key of selected) {
     const srcDir = path.join(sourceBase, mapping[key].src);
@@ -206,9 +251,28 @@ function main() {
         args.verbose
       );
     }
+
+    // Apply overlay (RN-specific files)
+    if (args.applyOverlay) {
+      const overlayDir = path.join(rnRoot, "packages-overrides", mapping[key].dest);
+      const appliedFiles = applyOverlayForPackage(overlayDir, destDir, args.dryRun, args.verbose);
+      if (appliedFiles.length > 0) {
+        overlayResults[key] = appliedFiles;
+      }
+    }
   }
 
+  // Summary
   console.log(`[sync-neko-packages] done`);
+  if (args.applyOverlay && Object.keys(overlayResults).length > 0) {
+    console.log(`\n[sync-neko-packages] Applied overlays:`);
+    for (const [pkg, files] of Object.entries(overlayResults)) {
+      console.log(`  ${pkg}:`);
+      for (const f of files) {
+        console.log(`    - ${f}`);
+      }
+    }
+  }
 }
 
 main();
